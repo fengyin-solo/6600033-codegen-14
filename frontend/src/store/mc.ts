@@ -7,6 +7,7 @@ export interface MCScenario {
   description: string
   params: Record<string, number>
   category: string
+  tags?: string[]
 }
 
 export interface MCResult {
@@ -26,6 +27,40 @@ export interface HypTestResult {
   significant: boolean
   alpha: number
   df?: number
+}
+
+export interface ScenarioDetail {
+  id: string
+  name: string
+  category: string
+  tags?: string[]
+}
+
+export interface RecommendCombo {
+  id: string
+  name: string
+  description: string
+  scenarios: ScenarioDetail[]
+  scenario_ids: string[]
+  reason: string
+  insights: string[]
+  difficulty: string
+  relevance_score: number
+}
+
+export interface RecommendResponse {
+  question: string
+  matched_keywords: string[]
+  recommended_combos: RecommendCombo[]
+  related_scenarios: ScenarioDetail[]
+}
+
+export interface ComboResult {
+  scenarioId: string
+  scenarioName: string
+  result: MCResult
+  completed: boolean
+  color: string
 }
 
 function normalRandom(): number {
@@ -98,13 +133,17 @@ function runMC(scenario: MCScenario, n: number): MCResult {
 }
 
 export const SCENARIOS: MCScenario[] = [
-  { id: 'pi', name: '圆周率π估算', description: '随机投点估算π值，观察收敛过程', params: {}, category: '基础' },
-  { id: 'brownian', name: '布朗运动模拟', description: '粒子热运动随机路径模拟', params: { dt: 0.01 }, category: '物理' },
-  { id: 'option', name: '欧式期权定价', description: 'Black-Scholes期权价格蒙特卡洛估算', params: { S0: 100, K: 105, r: 0.05, sigma: 0.2, T: 1 }, category: '金融' },
-  { id: 'random_walk', name: '随机游走', description: '一维离散随机游走轨迹模拟', params: {}, category: '基础' },
-  { id: 'diffusion', name: '粒子扩散', description: '二维粒子随机扩散位移分析', params: { D: 1, dt: 0.01 }, category: '物理' },
-  { id: 'gambler', name: '赌徒破产', description: '不利赌局下资金耗尽概率估算', params: { p: 0.45, bankroll: 50, goal: 100 }, category: '概率' }
+  { id: 'pi', name: '圆周率π估算', description: '随机投点估算π值，观察收敛过程', params: {}, category: '基础', tags: ['几何', '概率', '收敛', '随机投点'] },
+  { id: 'brownian', name: '布朗运动模拟', description: '粒子热运动随机路径模拟', params: { dt: 0.01 }, category: '物理', tags: ['物理', '随机过程', '时间序列', '扩散'] },
+  { id: 'option', name: '欧式期权定价', description: 'Black-Scholes期权价格蒙特卡洛估算', params: { S0: 100, K: 105, r: 0.05, sigma: 0.2, T: 1 }, category: '金融', tags: ['金融', '风险', '定价', '正态分布'] },
+  { id: 'random_walk', name: '随机游走', description: '一维离散随机游走轨迹模拟', params: {}, category: '基础', tags: ['基础', '随机过程', '离散', '路径'] },
+  { id: 'diffusion', name: '粒子扩散', description: '二维粒子随机扩散位移分析', params: { D: 1, dt: 0.01 }, category: '物理', tags: ['物理', '扩散', '二维', '距离'] },
+  { id: 'gambler', name: '赌徒破产', description: '不利赌局下资金耗尽概率估算', params: { p: 0.45, bankroll: 50, goal: 100 }, category: '概率', tags: ['概率', '风险', '破产', '马尔可夫链'] }
 ]
+
+export const COMBO_COLORS = ['#06b6d4', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#ec4899']
+
+const API_BASE = 'http://localhost:8000'
 
 export const useMCStore = defineStore('mc', () => {
   const currentScenario = ref<MCScenario>(SCENARIOS[0])
@@ -112,6 +151,15 @@ export const useMCStore = defineStore('mc', () => {
   const result = ref<MCResult | null>(null)
   const testResult = ref<HypTestResult | null>(null)
   const isRunning = ref(false)
+
+  const userQuestion = ref('')
+  const recommendResult = ref<RecommendResponse | null>(null)
+  const isRecommending = ref(false)
+  const selectedCombo = ref<RecommendCombo | null>(null)
+  const comboResults = ref<ComboResult[]>([])
+  const comboRunningIndex = ref(-1)
+  const isComboRunning = ref(false)
+  const activeTab = ref<'single' | 'combo'>('single')
 
   function runSimulation() {
     isRunning.value = true
@@ -133,6 +181,72 @@ export const useMCStore = defineStore('mc', () => {
 
   function setScenario(s: MCScenario) { currentScenario.value = s; result.value = null }
 
+  async function getRecommendations(question: string) {
+    if (!question.trim()) return
+    userQuestion.value = question
+    isRecommending.value = true
+    recommendResult.value = null
+    try {
+      const response = await fetch(`${API_BASE}/api/recommend`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question })
+      })
+      if (response.ok) {
+        recommendResult.value = await response.json()
+      }
+    } catch (e) {
+      console.error('Recommendation error:', e)
+    } finally {
+      isRecommending.value = false
+    }
+  }
+
+  function selectCombo(combo: RecommendCombo) {
+    selectedCombo.value = combo
+    comboResults.value = combo.scenario_ids.map((sid, idx) => {
+      const scenario = SCENARIOS.find(s => s.id === sid)!
+      return {
+        scenarioId: sid,
+        scenarioName: scenario.name,
+        result: null as unknown as MCResult,
+        completed: false,
+        color: COMBO_COLORS[idx % COMBO_COLORS.length]
+      }
+    })
+    activeTab.value = 'combo'
+  }
+
+  async function runComboSimulation() {
+    if (!selectedCombo.value || isComboRunning.value) return
+    isComboRunning.value = true
+    comboResults.value.forEach(r => { r.completed = false; r.result = null as unknown as MCResult })
+    
+    for (let i = 0; i < selectedCombo.value.scenario_ids.length; i++) {
+      comboRunningIndex.value = i
+      const sid = selectedCombo.value.scenario_ids[i]
+      const scenario = SCENARIOS.find(s => s.id === sid)!
+      await new Promise(resolve => setTimeout(resolve, 50))
+      const result = runMC(scenario, iterations.value)
+      comboResults.value[i].result = result
+      comboResults.value[i].completed = true
+    }
+    
+    comboRunningIndex.value = -1
+    isComboRunning.value = false
+  }
+
+  function clearCombo() {
+    selectedCombo.value = null
+    comboResults.value = []
+    activeTab.value = 'single'
+  }
+
+  function clearRecommend() {
+    recommendResult.value = null
+    userQuestion.value = ''
+  }
+
   const convergenceData = computed(() => {
     if (!result.value) return [] as [number, number][]
     return result.value.convergence.slice(0, 200).map((v, i): [number, number] => [i, Math.round(v * 100000) / 100000])
@@ -148,5 +262,30 @@ export const useMCStore = defineStore('mc', () => {
     return { xAxis: Array.from({ length: bins }, (_, i) => Math.round((mn + i * bs) * 100) / 100), data: counts }
   })
 
-  return { currentScenario, iterations, result, testResult, isRunning, convergenceData, histogramData, runSimulation, runTest, setScenario }
+  const comboConvergenceData = computed(() => {
+    const series: { name: string; data: [number, number][]; color: string }[] = []
+    comboResults.value.forEach(r => {
+      if (r.completed && r.result) {
+        series.push({
+          name: r.scenarioName,
+          data: r.result.convergence.slice(0, 200).map((v, i): [number, number] => [i, Math.round(v * 100000) / 100000]),
+          color: r.color
+        })
+      }
+    })
+    return series
+  })
+
+  const comboAllCompleted = computed(() => {
+    return comboResults.value.length > 0 && comboResults.value.every(r => r.completed)
+  })
+
+  return { 
+    currentScenario, iterations, result, testResult, isRunning, 
+    convergenceData, histogramData, runSimulation, runTest, setScenario,
+    userQuestion, recommendResult, isRecommending, selectedCombo, comboResults,
+    comboRunningIndex, isComboRunning, activeTab,
+    getRecommendations, selectCombo, runComboSimulation, clearCombo, clearRecommend,
+    comboConvergenceData, comboAllCompleted
+  }
 })
